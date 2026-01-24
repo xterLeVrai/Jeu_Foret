@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="fr">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>L'Aventure de la Fille des Bois</title>
+    <link rel="icon" href="girl.png">
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div id="game-container">
+        <h1>L'Aventure de la Fille des Bois</h1>
+
+        <div id="start-screen">
+            <h1>Bienvenue !</h1>
+            <p>Entrez votre nom pour commencer l'aventure</p>
+            <input type="text" id="player-name-input" placeholder="Votre nom" maxlength="15">
+            <button onclick="startGame()">Commencer l'aventure 🌲</button>
+            <p style="font-size: 0.9em; margin-top: 20px; opacity: 0.8;">
+                🐇 Lapin = 1 point | 🐔 Poule = 2 points<br>
+                Objectif : 30 points pour gagner !
+            </p>
+        </div>
+
+        <p>Utilise les flèches pour te déplacer. Attrape les animaux pour les mettre dans le poulailler !</p>
+        <div class="controls">
+            <button onclick="respawnRabbits()">Faire revenir des animaux 🐇</button>
+            <button onclick="resetGame()" style="background-color: #74b9ff;">Recommencer 🔄</button>
+        </div>
+        <canvas id="gameCanvas" width="800" height="600"></canvas>
+    </div>
+    <script src="game.js"></script>
+</body>
+
+</html>
