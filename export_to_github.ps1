@@ -6,7 +6,7 @@ $ErrorActionPreference = "Continue"
 $ProgressPreference = "SilentlyContinue"
 
 Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host "       🦊 EXPORT AUTOMATIQUE VERS GITHUB - FOREST GAME     " -ForegroundColor Yellow
+Write-Host "  🦊 SYNCHRO GITHUB & MAIRIE - FOREST GAME                 " -ForegroundColor Yellow
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -73,76 +73,67 @@ if (-not (Test-Path (Join-Path $scriptDir ".git"))) {
     & $gitCmd init
 }
 
-# 3. Vérifier ou demander l'URL du dépôt GitHub distant
-$configFile = Join-Path $scriptDir ".github_repo_url"
-$remoteUrl = ""
+# 3. URLs des dépôts cibles
+$githubUrl = "https://github.com/xterLeVrai/Jeu_Foret.git"
+$mairieUrl = "https://git.mairie.remiremont.fr/mickael.gerard/Jeu_Foret.git"
 
-if (Test-Path $configFile) {
-    $remoteUrl = (Get-Content $configFile -Raw).Trim()
-}
+# 4. Configuration des remotes distants
+Write-Host "🔗 Configuration des dépôts distants..." -ForegroundColor Cyan
 
-if (-not $remoteUrl) {
-    # Tenter de lire le remote origin existant
-    $existingRemote = (& $gitCmd remote get-url origin 2>$null)
-    if ($existingRemote) {
-        $remoteUrl = $existingRemote.Trim()
-    }
-}
-
-if (-not $remoteUrl) {
-    Write-Host ""
-    Write-Host "Entrez l'URL de votre dépôt GitHub distant" -ForegroundColor Cyan
-    Write-Host "(ex: https://github.com/xterLeVrai/Jeu_Foret.git) :" -ForegroundColor DarkGray
-    $remoteUrl = Read-Host "URL GitHub"
-    $remoteUrl = $remoteUrl.Trim()
-
-    if ($remoteUrl) {
-        Set-Content -Path $configFile -Value $remoteUrl -Force
-    }
-}
-
-if (-not $remoteUrl) {
-    Write-Host "❌ Aucune URL renseignée. Export annulé." -ForegroundColor Red
-    exit 1
-}
-
-# 4. Configurer le remote 'origin'
+# Remote origin (GitHub)
 $hasOrigin = & $gitCmd remote | Where-Object { $_ -eq "origin" }
-if ($hasOrigin) {
-    & $gitCmd remote set-url origin $remoteUrl
+if (-not $hasOrigin) {
+    & $gitCmd remote add origin $githubUrl
 } else {
-    & $gitCmd remote add origin $remoteUrl
+    & $gitCmd remote set-url origin $githubUrl
 }
 
-Write-Host "🔗 Remote configuré sur : $remoteUrl" -ForegroundColor Green
+# Remote mairie (Forge interne)
+$hasMairie = & $gitCmd remote | Where-Object { $_ -eq "mairie" }
+if (-not $hasMairie) {
+    & $gitCmd remote add mairie $mairieUrl
+} else {
+    & $gitCmd remote set-url mairie $mairieUrl
+}
 
-# 5. Préparer les commits et pousser
+# Configuration multi-push sur origin pour pousser vers les deux en même temps
+& $gitCmd remote set-url --add --push origin $githubUrl
+& $gitCmd remote set-url --add --push origin $mairieUrl
+
+Write-Host "  ✅ GitHub : $githubUrl" -ForegroundColor Green
+Write-Host "  ✅ Mairie : $mairieUrl" -ForegroundColor Green
+
+# 5. Préparer les commits
 Write-Host "`n📦 Ajout des fichiers..." -ForegroundColor Cyan
 & $gitCmd add .
 
 $status = & $gitCmd status --porcelain
 if ($status) {
-    $commitMsg = "Mise à jour Forest Game : améliorations visuelles, son poule, ZQSD et pause"
+    $commitMsg = "Mise à jour Forest Game : synchronisation GitHub et Forge Mairie"
     Write-Host "💾 Enregistrement du commit..." -ForegroundColor Cyan
     & $gitCmd commit -m "$commitMsg"
 } else {
-    Write-Host "ℹ️ Les fichiers sont déjà à jour dans Git." -ForegroundColor Yellow
+    Write-Host "ℹ️ Aucun nouveau changement local à committer." -ForegroundColor Yellow
 }
 
 # Renommer la branche en 'main'
 & $gitCmd branch -M main 2>$null
 
-# 6. Push vers GitHub
+# 6. Push vers GitHub et Mairie
 Write-Host "`n🚀 Envoi (push) vers GitHub..." -ForegroundColor Cyan
-& $gitCmd push -u origin main
+& $gitCmd push origin main
 if ($LASTEXITCODE -eq 0) {
-    Write-Host "`n🎉 SUCCÈS ! Votre projet Forest Game est en ligne sur GitHub :" -ForegroundColor Green
-    Write-Host "   $remoteUrl" -ForegroundColor Yellow
-    Write-Host ""
-    Write-Host "Astuce : Vous pouvez activer GitHub Pages dans Settings > Pages pour y jouer en ligne !" -ForegroundColor Cyan
+    Write-Host "  🎉 GitHub synchronisé !" -ForegroundColor Green
 } else {
-    Write-Host "`n⚠️ Note sur le push :" -ForegroundColor Yellow
-    Write-Host "Si GitHub vous demande de vous identifier dans une fenêtre, validez votre connexion pour terminer l'envoi." -ForegroundColor White
+    Write-Host "  ⚠️ Vérifiez la connexion à GitHub si nécessaire." -ForegroundColor Yellow
+}
+
+Write-Host "`n🚀 Envoi (push) vers Forge Mairie..." -ForegroundColor Cyan
+& $gitCmd push -uf mairie main
+if ($LASTEXITCODE -eq 0) {
+    Write-Host "  🎉 Forge Mairie synchronisée !" -ForegroundColor Green
+} else {
+    Write-Host "  ℹ️ Si une fenêtre s'ouvre pour vos identifiants Mairie, entrez votre login/mot de passe ou token pour valider l'envoi." -ForegroundColor Yellow
 }
 
 Write-Host "`nTerminé !"
