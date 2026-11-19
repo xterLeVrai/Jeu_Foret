@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="fr">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gare au Renard ! 🦊</title>
+    <link rel="icon" href="girl.png">
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div id="game-container">
+        <h1 id="main-title">Gare au Renard ! 🦊</h1>
+
+        <div id="start-screen">
+            <div class="screen-content">
+                <h1>Bienvenue !</h1>
+                <p>Entrez votre nom pour commencer l'aventure</p>
+                <input type="text" id="player-name-input" placeholder="Votre nom" maxlength="15">
+                <button onclick="startGame()">Commencer l'aventure 🌲</button>
+                <p style="font-size: 0.8em; margin-top: 20px; opacity: 0.7; line-height: 1.5;">
+                    🐇 Lapin = 1 | 🐔 Poule = 2 | 🌟 Or = 10 !<br>
+                    Objectif : 30 points | Flèches ou ZQSD / WASD | 🎮 Manette OK<br>
+                    Touche <strong>P</strong> ou <strong>Échap</strong> = Pause | <strong>Entrée</strong> = Valider
+                </p>
+            </div>
+            <div id="high-scores" class="leaderboard-container">
+                <!-- High scores will be injected here -->
+            </div>
+        </div>
+
+        <div id="victory-screen" class="hidden">
+            <div class="screen-content">
+                <h1 id="victory-title">VICTOIRE !</h1>
+                <p id="victory-msg">Félicitations !</p>
+                <div class="controls" style="margin-top: 30px;">
+                    <button onclick="startCountdown()"
+                        style="background: linear-gradient(135deg, #74b9ff, #0984e3);">Rejouer
+                        🔄</button>
+                    <button onclick="returnToMenu()" style="background: linear-gradient(135deg, #fdcb6e, #f39c12);">Menu
+                        Principal 👤</button>
+                </div>
+            </div>
+            <div id="victory-high-scores" class="leaderboard-container">
+                <!-- Reusing leaderboard display here -->
+            </div>
+        </div>
+
+        <div id="game-hud" class="hidden">
+            <div class="hud-top-row">
+                <div class="hud-item">
+                    <span class="hud-label">Score</span>
+                    <span id="hud-score" class="hud-value">0</span>
+                </div>
+                <div class="hud-item main">
+                    <span id="hud-game-title">Gare au Renard ! 🦊</span>
+                    <span class="hud-separator">|</span>
+                    <span id="hud-player-name">Joueur</span>
+                </div>
+                <div class="hud-item">
+                    <span class="hud-label">Temps</span>
+                    <span id="hud-timer" class="hud-value">0.0s</span>
+                </div>
+            </div>
+            <div class="hud-controls">
+                <button onclick="returnToMenu()" class="hud-btn btn-menu">Changer de joueur 👥</button>
+                <button onclick="startCountdown()" class="hud-btn btn-reset">Recommencer 🔄</button>
+            </div>
+        </div>
+        <canvas id="gameCanvas" width="800" height="600"></canvas>
+    </div>
+    <script src="game.js"></script>
+</body>
+
+</html>

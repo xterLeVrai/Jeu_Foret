@@ -1,0 +1,16 @@
+# Système et OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE et éditeurs
+.vscode/
+.idea/
+
+# Fichiers temporaires et logs
+*.log
+*.tmp
+.gemini/
+
+# Anciennes versions d'assets
+**/OLD*.png
