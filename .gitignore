@@ -10,6 +10,7 @@ desktop.ini
 # Fichiers temporaires et logs
 *.log
 *.tmp
+*.zip
 .gemini/
 
 # Anciennes versions d'assets
