@@ -14,12 +14,8 @@ const camera = {
 };
 
 // Assets
-const groundImg = new Image();
-groundImg.src = 'ground.png';
-const houseImg = new Image();
-houseImg.src = 'house.png';
-const coopImg = new Image();
-coopImg.src = 'coop.png';
+const bgImg = new Image(); // Central clearing (house + coop + paths)
+bgImg.src = 'background.png';
 const chickenImg = new Image();
 chickenImg.src = 'chicken.png';
 const girlImg = new Image();
@@ -36,12 +32,6 @@ dogImg.src = 'dog.png';
 const dogBarkAudio = new Audio('dog_bark.wav');
 const chickenAudio = new Audio('poule.wav');
 chickenAudio.volume = 0.35;
-
-// Pattern cache for tiled ground
-let groundPattern = null;
-groundImg.onload = () => {
-    groundPattern = ctx.createPattern(groundImg, 'repeat');
-};
 
 // Game state
 let keys = {};
@@ -62,30 +52,38 @@ const player = {
     stepTimer: 0
 };
 
-// World landmarks (placed in the central-north clearing)
+// Central clearing (background.png placed harmoniously in the upper-center)
+const clearing = {
+    x: 400,
+    y: 40,
+    width: 800,
+    height: 600
+};
+
+// Landmarks calibrated to background.png inside clearing
 const house = {
-    x: 240,
-    y: 180,
-    width: 150,
+    x: clearing.x + 175,
+    y: clearing.y + 87,
+    width: 145,
     height: 175
 };
 
 const coop = {
-    x: 520,
-    y: 150,
-    width: 135,
+    x: clearing.x + 428,
+    y: clearing.y + 34,
+    width: 125,
     height: 155
 };
 
-// River & Bridges (horizontal river cutting the lower half of the map)
+// River & Bridges (horizontal river in the southern half of the map)
 const river = {
-    y: 740,
+    y: 780,
     height: 70
 };
 
 const bridges = [
-    { x: 340, y: river.y - 8, width: 110, height: river.height + 16 },
-    { x: 1120, y: river.y - 8, width: 110, height: river.height + 16 }
+    { x: 495, y: river.y - 10, width: 120, height: river.height + 20 },
+    { x: 1120, y: river.y - 10, width: 120, height: river.height + 20 }
 ];
 
 // Game State
@@ -143,11 +141,10 @@ function rectsOverlap(ax, ay, aw, ah, bx, by, bw, bh, padding = 0) {
            ay + ah + padding > by;
 }
 
-function isOnBridge(x, y, w, h) {
+function isInsideBridgeCorridor(x, w) {
     const cx = x + w / 2;
-    const cy = y + h / 2;
     for (const b of bridges) {
-        if (cx >= b.x && cx <= b.x + b.width && cy >= b.y && cy <= b.y + b.height) {
+        if (cx >= b.x + 8 && cx <= b.x + b.width - 8) {
             return true;
         }
     }
@@ -161,21 +158,25 @@ function collidesWithEnvironment(x, y, w, h, ignoreRiver = false) {
         return true;
     }
 
-    // House collision (solid base of the house)
-    if (rectsOverlap(x, y, w, h, house.x + 15, house.y + 50, house.width - 30, house.height - 60)) {
+    // House collision (solid base of the house in background.png)
+    if (rectsOverlap(x + 6, y + h * 0.5, w - 12, h * 0.45, house.x + 10, house.y + 40, house.width - 20, house.height - 50)) {
         return true;
     }
 
-    // River collision (unless on a bridge)
-    if (!ignoreRiver && rectsOverlap(x, y + h * 0.5, w, h * 0.4, 0, river.y, WORLD_WIDTH, river.height)) {
-        if (!isOnBridge(x, y, w, h)) {
+    // River collision: allow crossing seamlessly inside bridge horizontal corridor
+    const footX = x + 8;
+    const footW = w - 16;
+    const footY = y + h - 14;
+    const footH = 14;
+    if (!ignoreRiver && rectsOverlap(footX, footY, footW, footH, 0, river.y, WORLD_WIDTH, river.height)) {
+        if (!isInsideBridgeCorridor(x, w)) {
             return true;
         }
     }
 
     // Natural obstacles (rocks, trees, bushes)
     for (const obs of obstacles) {
-        if (rectsOverlap(x + 4, y + h * 0.45, w - 8, h * 0.45, obs.hx, obs.hy, obs.hw, obs.hh)) {
+        if (rectsOverlap(x + 6, y + h * 0.5, w - 12, h * 0.45, obs.hx, obs.hy, obs.hw, obs.hh)) {
             return true;
         }
     }
@@ -188,11 +189,11 @@ function generateObstacles() {
     const types = ['tree', 'tree', 'rock', 'bush'];
     let attempts = 0;
 
-    while (obstacles.length < 34 && attempts < 400) {
+    while (obstacles.length < 36 && attempts < 450) {
         attempts++;
         const type = types[Math.floor(Math.random() * types.length)];
-        const x = 60 + Math.random() * (WORLD_WIDTH - 160);
-        const y = 60 + Math.random() * (WORLD_HEIGHT - 160);
+        const x = 50 + Math.random() * (WORLD_WIDTH - 150);
+        const y = 50 + Math.random() * (WORLD_HEIGHT - 150);
 
         let w = 64, h = 80, hx = x + 16, hy = y + 48, hw = 32, hh = 26;
         if (type === 'rock') {
@@ -203,12 +204,11 @@ function generateObstacles() {
             hx = x + 6; hy = y + 14; hw = 34; hh = 22;
         }
 
-        // Keep clear of house, coop, player spawn, river & bridges
-        if (rectsOverlap(x, y, w, h, house.x, house.y, house.width, house.height, 45)) continue;
-        if (rectsOverlap(x, y, w, h, coop.x, coop.y, coop.width, coop.height, 45)) continue;
-        if (rectsOverlap(x, y, w, h, 300, 360, 140, 140, 30)) continue;
-        if (rectsOverlap(x, y, w, h, 0, river.y, WORLD_WIDTH, river.height, 25)) continue;
-        if (obstacles.some(o => rectsOverlap(x, y, w, h, o.x, o.y, o.w, o.h, 25))) continue;
+        // Keep clear of the central clearing (background.png already has its own trees/rocks), river, and bridges
+        if (rectsOverlap(x, y, w, h, clearing.x + 20, clearing.y + 20, clearing.width - 40, clearing.height - 40, 15)) continue;
+        if (rectsOverlap(x, y, w, h, 0, river.y, WORLD_WIDTH, river.height, 30)) continue;
+        if (bridges.some(b => rectsOverlap(x, y, w, h, b.x - 20, b.y - 60, b.width + 40, b.height + 120))) continue;
+        if (obstacles.some(o => rectsOverlap(x, y, w, h, o.x, o.y, o.w, o.h, 24))) continue;
 
         obstacles.push({ type, x, y, w, h, hx, hy, hw, hh, swayOffset: Math.random() * Math.PI * 2 });
     }
@@ -384,32 +384,93 @@ function drawFoliage() {
 }
 
 function drawWorldTerrain() {
-    // Base grass pattern or solid fallback
-    if (groundPattern) {
-        ctx.fillStyle = groundPattern;
-        ctx.fillRect(camera.x, camera.y, SCREEN_WIDTH, SCREEN_HEIGHT);
-    } else {
-        ctx.fillStyle = '#3b7a3e';
-        ctx.fillRect(camera.x, camera.y, SCREEN_WIDTH, SCREEN_HEIGHT);
-    }
+    // Rich forest meadow background matching background.png palette
+    const bgGrad = ctx.createRadialGradient(
+        clearing.x + clearing.width / 2, clearing.y + clearing.height / 2, 300,
+        WORLD_WIDTH / 2, WORLD_HEIGHT / 2, 1100
+    );
+    bgGrad.addColorStop(0, '#2a6f33');
+    bgGrad.addColorStop(0.6, '#21592b');
+    bgGrad.addColorStop(1, '#163d1e');
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(camera.x, camera.y, SCREEN_WIDTH, SCREEN_HEIGHT);
 
-    // Dirt paths connecting house, coop and bridges
+    // Subtle meadow patches outside clearing for organic texture
     ctx.save();
-    ctx.strokeStyle = 'rgba(189, 154, 102, 0.55)';
+    ctx.fillStyle = 'rgba(56, 142, 60, 0.22)';
+    for (let px = 80; px < WORLD_WIDTH; px += 190) {
+        for (let py = 80; py < WORLD_HEIGHT; py += 170) {
+            if (rectsOverlap(px, py, 90, 60, clearing.x, clearing.y, clearing.width, clearing.height)) continue;
+            ctx.beginPath();
+            ctx.ellipse(px + ((py * 13) % 40), py + ((px * 7) % 30), 55, 32, 0.2, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+    ctx.restore();
+
+    // Extended dirt paths connecting background.png exits to the bridges & southern woods
+    ctx.save();
+    ctx.strokeStyle = '#8b5e3c';
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    ctx.lineWidth = 42;
+    ctx.lineWidth = 48;
     ctx.beginPath();
-    ctx.moveTo(house.x + house.width / 2, house.y + house.height - 10);
-    ctx.lineTo(395, 420);
-    ctx.lineTo(coop.x + coop.width / 2, coop.y + coop.height - 10);
-    ctx.moveTo(395, 420);
-    ctx.lineTo(bridges[0].x + bridges[0].width / 2, bridges[0].y + bridges[0].height + 80);
-    ctx.moveTo(395, 420);
-    ctx.lineTo(bridges[1].x + bridges[1].width / 2, 480);
-    ctx.lineTo(bridges[1].x + bridges[1].width / 2, bridges[1].y + bridges[1].height + 80);
+    // South exit from background.png -> West Bridge -> South forest
+    ctx.moveTo(clearing.x + 158, clearing.y + clearing.height - 25);
+    ctx.quadraticCurveTo(555, 690, bridges[0].x + bridges[0].width / 2, river.y);
+    ctx.moveTo(bridges[0].x + bridges[0].width / 2, river.y + river.height);
+    ctx.quadraticCurveTo(530, 980, 420, 1130);
+    // East exit from background.png -> East Bridge -> South-East forest
+    ctx.moveTo(clearing.x + clearing.width - 25, clearing.y + 372);
+    ctx.quadraticCurveTo(1180, 420, bridges[1].x + bridges[1].width / 2, river.y);
+    ctx.moveTo(bridges[1].x + bridges[1].width / 2, river.y + river.height);
+    ctx.quadraticCurveTo(1210, 980, 1340, 1120);
+    ctx.stroke();
+
+    // Lighter inner path highlight
+    ctx.strokeStyle = '#a0724d';
+    ctx.lineWidth = 30;
     ctx.stroke();
     ctx.restore();
+
+    // Central clearing (background.png with house & coop)
+    if (bgImg && bgImg.complete && bgImg.naturalWidth !== 0) {
+        ctx.drawImage(bgImg, clearing.x, clearing.y, clearing.width, clearing.height);
+
+        // Soft feathered edge blend so background.png integrates seamlessly into the forest
+        const feather = 48;
+        ctx.save();
+        // Top fade
+        let gTop = ctx.createLinearGradient(0, clearing.y, 0, clearing.y + feather);
+        gTop.addColorStop(0, '#225b2b');
+        gTop.addColorStop(1, 'rgba(34, 91, 43, 0)');
+        ctx.fillStyle = gTop;
+        ctx.fillRect(clearing.x, clearing.y, clearing.width, feather);
+
+        // Bottom fade (skip around south path exit)
+        let gBot = ctx.createLinearGradient(0, clearing.y + clearing.height - feather, 0, clearing.y + clearing.height);
+        gBot.addColorStop(0, 'rgba(34, 91, 43, 0)');
+        gBot.addColorStop(1, '#235e2c');
+        ctx.fillStyle = gBot;
+        ctx.fillRect(clearing.x, clearing.y + clearing.height - feather, 115, feather);
+        ctx.fillRect(clearing.x + 205, clearing.y + clearing.height - feather, clearing.width - 205, feather);
+
+        // Left fade
+        let gLeft = ctx.createLinearGradient(clearing.x, 0, clearing.x + feather, 0);
+        gLeft.addColorStop(0, '#225b2b');
+        gLeft.addColorStop(1, 'rgba(34, 91, 43, 0)');
+        ctx.fillStyle = gLeft;
+        ctx.fillRect(clearing.x, clearing.y, feather, clearing.height);
+
+        // Right fade (skip around east path exit)
+        let gRight = ctx.createLinearGradient(clearing.x + clearing.width - feather, 0, clearing.x + clearing.width, 0);
+        gRight.addColorStop(0, 'rgba(34, 91, 43, 0)');
+        gRight.addColorStop(1, '#235e2c');
+        ctx.fillStyle = gRight;
+        ctx.fillRect(clearing.x + clearing.width - feather, clearing.y, feather, 330);
+        ctx.fillRect(clearing.x + clearing.width - feather, clearing.y + 415, feather, clearing.height - 415);
+        ctx.restore();
+    }
 
     // Animated River
     const time = Date.now() / 1000;
@@ -568,8 +629,8 @@ class SmokeParticle {
         this.reset();
     }
     reset() {
-        this.x = house.x + house.width * 0.72 + (Math.random() - 0.5) * 6;
-        this.y = house.y + 10;
+        this.x = clearing.x + 338 + (Math.random() - 0.5) * 6;
+        this.y = clearing.y + 45;
         this.size = 4 + Math.random() * 3;
         this.alpha = 0.4 + Math.random() * 0.2;
         this.dx = (Math.random() - 0.5) * 0.3;
@@ -1771,14 +1832,8 @@ function draw() {
     // Footprints on ground
     footprints.forEach(fp => fp.draw());
 
-    // Buildings
-    drawBuildingShadow(house.x, house.y, house.width, house.height);
-    safeDrawAnimatedImage(houseImg, house.x, house.y, house.width, house.height);
-
+    // Coop glow & Chimney smoke (over background.png clearing)
     drawCoopGlow();
-    drawBuildingShadow(coop.x, coop.y, coop.width, coop.height);
-    safeDrawAnimatedImage(coopImg, coop.x, coop.y, coop.width, coop.height);
-
     updateAndDrawSmoke();
 
     // Obstacles (trees, rocks, bushes)
