@@ -1,13 +1,25 @@
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 
-// Game constants
+// Screen & World constants
 const SCREEN_WIDTH = 800;
 const SCREEN_HEIGHT = 600;
+const WORLD_WIDTH = 1600;
+const WORLD_HEIGHT = 1200;
+
+// Camera state
+const camera = {
+    x: 0,
+    y: 0
+};
 
 // Assets
-const bgImg = new Image(); // Composite background (terrain + house + coop)
-bgImg.src = 'background.png';
+const groundImg = new Image();
+groundImg.src = 'ground.png';
+const houseImg = new Image();
+houseImg.src = 'house.png';
+const coopImg = new Image();
+coopImg.src = 'coop.png';
 const chickenImg = new Image();
 chickenImg.src = 'chicken.png';
 const girlImg = new Image();
@@ -20,25 +32,61 @@ const goldenImg = new Image();
 goldenImg.src = 'pouleor.png';
 const dogImg = new Image();
 dogImg.src = 'dog.png';
+
 const dogBarkAudio = new Audio('dog_bark.wav');
 const chickenAudio = new Audio('poule.wav');
 chickenAudio.volume = 0.35;
 
+// Pattern cache for tiled ground
+let groundPattern = null;
+groundImg.onload = () => {
+    groundPattern = ctx.createPattern(groundImg, 'repeat');
+};
+
 // Game state
 let keys = {};
-let gamepadState = {}; // Separate state for gamepad
+let gamepadState = {};
 let score = 0;
 
 // Entities
 const player = {
-    x: 100,
-    y: 300,
+    x: 350,
+    y: 420,
     width: 48,
     height: 48,
     speed: 4,
     direction: 'down',
-    facingLeft: false
+    facingLeft: false,
+    isMoving: false,
+    walkTimer: 0,
+    stepTimer: 0
 };
+
+// World landmarks (placed in the central-north clearing)
+const house = {
+    x: 240,
+    y: 180,
+    width: 150,
+    height: 175
+};
+
+const coop = {
+    x: 520,
+    y: 150,
+    width: 135,
+    height: 155
+};
+
+// River & Bridges (horizontal river cutting the lower half of the map)
+const river = {
+    y: 740,
+    height: 70
+};
+
+const bridges = [
+    { x: 340, y: river.y - 8, width: 110, height: river.height + 16 },
+    { x: 1120, y: river.y - 8, width: 110, height: river.height + 16 }
+];
 
 // Game State
 let playerName = "Joueur";
@@ -47,8 +95,14 @@ let isPaused = false;
 let gameWon = false;
 let particles = [];
 let floatingTexts = [];
+let footprints = [];
+let weatherParticles = [];
+let obstacles = [];
 let foxes = [];
 let dog;
+
+// Screen transition fade (1 -> 0)
+let screenFade = 0;
 
 // PowerUps
 let powerups = [];
@@ -66,37 +120,206 @@ let countdown = 3;
 let isCountingDown = false;
 let countdownTimer = 0;
 
-// NEW: HUD Elements
+// HUD Elements
 const hudElement = document.getElementById('game-hud');
 const hudScore = document.getElementById('hud-score');
 const hudTimer = document.getElementById('hud-timer');
 const hudPlayerName = document.getElementById('hud-player-name');
 const mainTitle = document.getElementById('main-title');
 
-// NEW: Visual Effects State
 function triggerShake() {
     canvas.classList.remove('shake-canvas');
-    void canvas.offsetWidth; // Trigger reflow
+    void canvas.offsetWidth;
     canvas.classList.add('shake-canvas');
     setTimeout(() => canvas.classList.remove('shake-canvas'), 400);
 }
 
-// --- GRAPHICS OVERHAUL ---
+// --- WORLD & OBSTACLE GENERATION ---
 
-// B2: Dynamic Foliage (generated once per game)
+function rectsOverlap(ax, ay, aw, ah, bx, by, bw, bh, padding = 0) {
+    return ax < bx + bw + padding &&
+           ax + aw + padding > bx &&
+           ay < by + bh + padding &&
+           ay + ah + padding > by;
+}
+
+function isOnBridge(x, y, w, h) {
+    const cx = x + w / 2;
+    const cy = y + h / 2;
+    for (const b of bridges) {
+        if (cx >= b.x && cx <= b.x + b.width && cy >= b.y && cy <= b.y + b.height) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function collidesWithEnvironment(x, y, w, h, ignoreRiver = false) {
+    // World boundaries (inside natural hedge)
+    const border = 14;
+    if (x < border || y < border || x + w > WORLD_WIDTH - border || y + h > WORLD_HEIGHT - border) {
+        return true;
+    }
+
+    // House collision (solid base of the house)
+    if (rectsOverlap(x, y, w, h, house.x + 15, house.y + 50, house.width - 30, house.height - 60)) {
+        return true;
+    }
+
+    // River collision (unless on a bridge)
+    if (!ignoreRiver && rectsOverlap(x, y + h * 0.5, w, h * 0.4, 0, river.y, WORLD_WIDTH, river.height)) {
+        if (!isOnBridge(x, y, w, h)) {
+            return true;
+        }
+    }
+
+    // Natural obstacles (rocks, trees, bushes)
+    for (const obs of obstacles) {
+        if (rectsOverlap(x + 4, y + h * 0.45, w - 8, h * 0.45, obs.hx, obs.hy, obs.hw, obs.hh)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function generateObstacles() {
+    obstacles = [];
+    const types = ['tree', 'tree', 'rock', 'bush'];
+    let attempts = 0;
+
+    while (obstacles.length < 34 && attempts < 400) {
+        attempts++;
+        const type = types[Math.floor(Math.random() * types.length)];
+        const x = 60 + Math.random() * (WORLD_WIDTH - 160);
+        const y = 60 + Math.random() * (WORLD_HEIGHT - 160);
+
+        let w = 64, h = 80, hx = x + 16, hy = y + 48, hw = 32, hh = 26;
+        if (type === 'rock') {
+            w = 48; h = 38;
+            hx = x + 6; hy = y + 12; hw = 36; hh = 22;
+        } else if (type === 'bush') {
+            w = 46; h = 40;
+            hx = x + 6; hy = y + 14; hw = 34; hh = 22;
+        }
+
+        // Keep clear of house, coop, player spawn, river & bridges
+        if (rectsOverlap(x, y, w, h, house.x, house.y, house.width, house.height, 45)) continue;
+        if (rectsOverlap(x, y, w, h, coop.x, coop.y, coop.width, coop.height, 45)) continue;
+        if (rectsOverlap(x, y, w, h, 300, 360, 140, 140, 30)) continue;
+        if (rectsOverlap(x, y, w, h, 0, river.y, WORLD_WIDTH, river.height, 25)) continue;
+        if (obstacles.some(o => rectsOverlap(x, y, w, h, o.x, o.y, o.w, o.h, 25))) continue;
+
+        obstacles.push({ type, x, y, w, h, hx, hy, hw, hh, swayOffset: Math.random() * Math.PI * 2 });
+    }
+}
+
+function drawObstacles() {
+    const time = Date.now() / 1000;
+    obstacles.forEach(obs => {
+        // Cull off-screen obstacles
+        if (obs.x + obs.w < camera.x - 40 || obs.x > camera.x + SCREEN_WIDTH + 40 ||
+            obs.y + obs.h < camera.y - 40 || obs.y > camera.y + SCREEN_HEIGHT + 40) {
+            return;
+        }
+
+        ctx.save();
+        if (obs.type === 'tree') {
+            // Shadow
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.22)';
+            ctx.beginPath();
+            ctx.ellipse(obs.x + obs.w / 2, obs.y + obs.h - 6, 26, 10, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Trunk
+            ctx.fillStyle = '#5d4037';
+            ctx.fillRect(obs.x + obs.w / 2 - 7, obs.y + obs.h - 30, 14, 24);
+            ctx.fillStyle = '#4e342e';
+            ctx.fillRect(obs.x + obs.w / 2, obs.y + obs.h - 30, 7, 24);
+
+            // Foliage layers with gentle wind sway
+            const sway = Math.sin(time * 1.4 + obs.swayOffset) * 2.5;
+            ctx.fillStyle = '#1e5631';
+            ctx.beginPath();
+            ctx.arc(obs.x + obs.w / 2 + sway * 0.5, obs.y + 38, 26, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.fillStyle = '#2e7d32';
+            ctx.beginPath();
+            ctx.arc(obs.x + obs.w / 2 - 10 + sway * 0.7, obs.y + 28, 18, 0, Math.PI * 2);
+            ctx.arc(obs.x + obs.w / 2 + 12 + sway * 0.7, obs.y + 30, 17, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.fillStyle = '#43a047';
+            ctx.beginPath();
+            ctx.arc(obs.x + obs.w / 2 + sway, obs.y + 20, 16, 0, Math.PI * 2);
+            ctx.fill();
+        } else if (obs.type === 'rock') {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
+            ctx.beginPath();
+            ctx.ellipse(obs.x + obs.w / 2, obs.y + obs.h - 3, 22, 8, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.fillStyle = '#636e72';
+            ctx.beginPath();
+            ctx.moveTo(obs.x + 6, obs.y + obs.h - 6);
+            ctx.lineTo(obs.x + 10, obs.y + 10);
+            ctx.lineTo(obs.x + 26, obs.y + 4);
+            ctx.lineTo(obs.x + obs.w - 6, obs.y + 14);
+            ctx.lineTo(obs.x + obs.w - 4, obs.y + obs.h - 6);
+            ctx.closePath();
+            ctx.fill();
+
+            ctx.fillStyle = '#95a5a6';
+            ctx.beginPath();
+            ctx.moveTo(obs.x + 12, obs.y + 12);
+            ctx.lineTo(obs.x + 26, obs.y + 6);
+            ctx.lineTo(obs.x + obs.w - 14, obs.y + 14);
+            ctx.lineTo(obs.x + 24, obs.y + 20);
+            ctx.closePath();
+            ctx.fill();
+        } else {
+            // Bush
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.18)';
+            ctx.beginPath();
+            ctx.ellipse(obs.x + obs.w / 2, obs.y + obs.h - 4, 20, 7, 0, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.fillStyle = '#27ae60';
+            ctx.beginPath();
+            ctx.arc(obs.x + 14, obs.y + 22, 13, 0, Math.PI * 2);
+            ctx.arc(obs.x + 32, obs.y + 22, 13, 0, Math.PI * 2);
+            ctx.arc(obs.x + 23, obs.y + 14, 14, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Little berries
+            ctx.fillStyle = '#e74c3c';
+            ctx.beginPath();
+            ctx.arc(obs.x + 16, obs.y + 18, 2.5, 0, Math.PI * 2);
+            ctx.arc(obs.x + 28, obs.y + 14, 2.5, 0, Math.PI * 2);
+            ctx.arc(obs.x + 25, obs.y + 24, 2.5, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        ctx.restore();
+    });
+}
+
+// --- GRAPHICS & ATMOSPHERE ---
+
+// Dynamic Foliage across the entire world
 let foliageItems = [];
 function generateFoliage() {
     foliageItems = [];
     const types = ['grass', 'flower', 'pebble'];
-    for (let i = 0; i < 80; i++) {
+    for (let i = 0; i < 240; i++) {
         const type = types[Math.floor(Math.random() * types.length)];
-        const x = Math.random() * SCREEN_WIDTH;
-        const y = Math.random() * SCREEN_HEIGHT;
-        // Avoid spawning on top of house or coop
-        if (x > house.x - 10 && x < house.x + house.width + 10 &&
-            y > house.y - 10 && y < house.y + house.height + 10) continue;
-        if (x > coop.x - 10 && x < coop.x + coop.width + 10 &&
-            y > coop.y - 10 && y < coop.y + coop.height + 10) continue;
+        const x = 20 + Math.random() * (WORLD_WIDTH - 40);
+        const y = 20 + Math.random() * (WORLD_HEIGHT - 40);
+
+        if (rectsOverlap(x, y, 10, 10, house.x, house.y, house.width, house.height, 10)) continue;
+        if (rectsOverlap(x, y, 10, 10, coop.x, coop.y, coop.width, coop.height, 10)) continue;
+        if (rectsOverlap(x, y, 10, 10, 0, river.y, WORLD_WIDTH, river.height, 10)) continue;
+
         let color;
         let size = 3 + Math.random() * 5;
         if (type === 'grass') {
@@ -117,6 +340,11 @@ function generateFoliage() {
 function drawFoliage() {
     const time = Date.now() / 1000;
     foliageItems.forEach(item => {
+        if (item.x < camera.x - 20 || item.x > camera.x + SCREEN_WIDTH + 20 ||
+            item.y < camera.y - 20 || item.y > camera.y + SCREEN_HEIGHT + 20) {
+            return;
+        }
+
         ctx.save();
         if (item.type === 'grass') {
             const sway = Math.sin(time * 1.5 + item.sway) * 2;
@@ -129,25 +357,23 @@ function drawFoliage() {
             ctx.closePath();
             ctx.fill();
         } else if (item.type === 'flower') {
-            // Stem
             ctx.strokeStyle = '#2d8a4e';
             ctx.lineWidth = 1;
             ctx.beginPath();
             ctx.moveTo(item.x, item.y);
             ctx.lineTo(item.x, item.y - item.size * 2);
             ctx.stroke();
-            // Petals
+
             ctx.fillStyle = item.color;
             ctx.beginPath();
             ctx.arc(item.x, item.y - item.size * 2, item.size, 0, Math.PI * 2);
             ctx.fill();
-            // Center
+
             ctx.fillStyle = '#ffd93d';
             ctx.beginPath();
             ctx.arc(item.x, item.y - item.size * 2, item.size * 0.4, 0, Math.PI * 2);
             ctx.fill();
         } else {
-            // Pebble
             ctx.fillStyle = item.color;
             ctx.beginPath();
             ctx.ellipse(item.x, item.y, item.size, item.size * 0.6, 0, 0, Math.PI * 2);
@@ -157,7 +383,91 @@ function drawFoliage() {
     });
 }
 
-// B1: Shadow system
+function drawWorldTerrain() {
+    // Base grass pattern or solid fallback
+    if (groundPattern) {
+        ctx.fillStyle = groundPattern;
+        ctx.fillRect(camera.x, camera.y, SCREEN_WIDTH, SCREEN_HEIGHT);
+    } else {
+        ctx.fillStyle = '#3b7a3e';
+        ctx.fillRect(camera.x, camera.y, SCREEN_WIDTH, SCREEN_HEIGHT);
+    }
+
+    // Dirt paths connecting house, coop and bridges
+    ctx.save();
+    ctx.strokeStyle = 'rgba(189, 154, 102, 0.55)';
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = 42;
+    ctx.beginPath();
+    ctx.moveTo(house.x + house.width / 2, house.y + house.height - 10);
+    ctx.lineTo(395, 420);
+    ctx.lineTo(coop.x + coop.width / 2, coop.y + coop.height - 10);
+    ctx.moveTo(395, 420);
+    ctx.lineTo(bridges[0].x + bridges[0].width / 2, bridges[0].y + bridges[0].height + 80);
+    ctx.moveTo(395, 420);
+    ctx.lineTo(bridges[1].x + bridges[1].width / 2, 480);
+    ctx.lineTo(bridges[1].x + bridges[1].width / 2, bridges[1].y + bridges[1].height + 80);
+    ctx.stroke();
+    ctx.restore();
+
+    // Animated River
+    const time = Date.now() / 1000;
+    ctx.save();
+    // Riverbanks
+    ctx.fillStyle = '#8c7a5b';
+    ctx.fillRect(0, river.y - 6, WORLD_WIDTH, river.height + 12);
+
+    // Water gradient
+    const waterGrad = ctx.createLinearGradient(0, river.y, 0, river.y + river.height);
+    waterGrad.addColorStop(0, '#1e88e5');
+    waterGrad.addColorStop(0.5, '#29b6f6');
+    waterGrad.addColorStop(1, '#1565c0');
+    ctx.fillStyle = waterGrad;
+    ctx.fillRect(0, river.y, WORLD_WIDTH, river.height);
+
+    // Flowing water ripples
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+    ctx.lineWidth = 2;
+    for (let wx = ((time * 45) % 120) - 120; wx < WORLD_WIDTH; wx += 120) {
+        ctx.beginPath();
+        ctx.moveTo(wx, river.y + 20);
+        ctx.quadraticCurveTo(wx + 25, river.y + 14, wx + 50, river.y + 20);
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(wx + 55, river.y + 48);
+        ctx.quadraticCurveTo(wx + 80, river.y + 54, wx + 105, river.y + 48);
+        ctx.stroke();
+    }
+    ctx.restore();
+
+    // Wooden Bridges
+    bridges.forEach(b => {
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,0,0,0.25)';
+        ctx.fillRect(b.x + 4, b.y + 6, b.width, b.height);
+
+        // Planks
+        ctx.fillStyle = '#8d6e63';
+        ctx.fillRect(b.x, b.y, b.width, b.height);
+        ctx.strokeStyle = '#4e342e';
+        ctx.lineWidth = 2;
+        for (let py = b.y + 10; py < b.y + b.height; py += 12) {
+            ctx.beginPath();
+            ctx.moveTo(b.x, py);
+            ctx.lineTo(b.x + b.width, py);
+            ctx.stroke();
+        }
+        // Side rails
+        ctx.fillStyle = '#5d4037';
+        ctx.fillRect(b.x - 4, b.y, 8, b.height);
+        ctx.fillRect(b.x + b.width - 4, b.y, 8, b.height);
+        ctx.restore();
+    });
+}
+
+// Shadow system
 function drawShadow(x, y, width, height, opacity = 0.25) {
     ctx.save();
     ctx.fillStyle = `rgba(0, 0, 0, ${opacity})`;
@@ -169,42 +479,115 @@ function drawShadow(x, y, width, height, opacity = 0.25) {
 
 function drawBuildingShadow(x, y, width, height) {
     ctx.save();
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.18)';
     ctx.beginPath();
-    ctx.ellipse(x + width / 2, y + height + 5, width * 0.55, height * 0.12, 0, 0, Math.PI * 2);
+    ctx.ellipse(x + width / 2, y + height - 4, width * 0.52, height * 0.12, 0, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
 }
 
-// B3: Chimney smoke particles
+// Footprints behind player & foxes
+class Footprint {
+    constructor(x, y, angle = 0) {
+        this.x = x;
+        this.y = y;
+        this.angle = angle;
+        this.life = 45;
+        this.maxLife = 45;
+    }
+    update() {
+        this.life--;
+    }
+    draw() {
+        ctx.save();
+        ctx.globalAlpha = (this.life / this.maxLife) * 0.35;
+        ctx.fillStyle = '#2d3436';
+        ctx.translate(this.x, this.y);
+        ctx.rotate(this.angle);
+        ctx.beginPath();
+        ctx.ellipse(0, 0, 4, 2.5, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    }
+}
+
+// Weather particles (floating forest leaves & pollen in screen space)
+function initWeather() {
+    weatherParticles = [];
+    for (let i = 0; i < 28; i++) {
+        weatherParticles.push({
+            x: Math.random() * SCREEN_WIDTH,
+            y: Math.random() * SCREEN_HEIGHT,
+            size: 2 + Math.random() * 3.5,
+            speedX: 0.3 + Math.random() * 0.6,
+            speedY: 0.4 + Math.random() * 0.5,
+            sway: Math.random() * Math.PI * 2,
+            isLeaf: Math.random() < 0.35,
+            color: Math.random() < 0.5 ? '#a8e6cf' : '#ffd3b6'
+        });
+    }
+}
+
+function updateAndDrawWeather() {
+    const time = Date.now() / 1000;
+    ctx.save();
+    weatherParticles.forEach(p => {
+        p.x += p.speedX + Math.sin(time + p.sway) * 0.3;
+        p.y += p.speedY;
+        if (p.x > SCREEN_WIDTH + 10) p.x = -10;
+        if (p.y > SCREEN_HEIGHT + 10) {
+            p.y = -10;
+            p.x = Math.random() * SCREEN_WIDTH;
+        }
+
+        if (p.isLeaf) {
+            ctx.save();
+            ctx.translate(p.x, p.y);
+            ctx.rotate(time * 1.5 + p.sway);
+            ctx.globalAlpha = 0.55;
+            ctx.fillStyle = p.color;
+            ctx.beginPath();
+            ctx.ellipse(0, 0, p.size * 1.4, p.size * 0.7, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        } else {
+            ctx.globalAlpha = 0.4;
+            ctx.fillStyle = '#fff9c4';
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.size * 0.5, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    });
+    ctx.restore();
+}
+
+// Chimney smoke particles
 let smokeParticles = [];
 class SmokeParticle {
     constructor() {
         this.reset();
     }
     reset() {
-        // Chimney position - calibrated to the chimney in background.png
-        // The chimney is roughly at 28% from left, 5% from top of canvas
-        this.x = 338 + (Math.random() - 0.5) * 6;
-        this.y = 45;
-        this.size = 3 + Math.random() * 3;
+        this.x = house.x + house.width * 0.72 + (Math.random() - 0.5) * 6;
+        this.y = house.y + 10;
+        this.size = 4 + Math.random() * 3;
         this.alpha = 0.4 + Math.random() * 0.2;
         this.dx = (Math.random() - 0.5) * 0.3;
-        this.dy = -0.3 - Math.random() * 0.4;
+        this.dy = -0.35 - Math.random() * 0.4;
         this.life = 80 + Math.random() * 40;
         this.maxLife = this.life;
     }
     update() {
         this.x += this.dx + Math.sin(Date.now() / 500 + this.life) * 0.15;
         this.y += this.dy;
-        this.size += 0.05;
+        this.size += 0.06;
         this.life--;
         this.alpha = (this.life / this.maxLife) * 0.35;
     }
     draw() {
         ctx.save();
         ctx.globalAlpha = this.alpha;
-        ctx.fillStyle = '#c8d6e5';
+        ctx.fillStyle = '#dfe6e9';
         ctx.beginPath();
         ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
         ctx.fill();
@@ -213,11 +596,9 @@ class SmokeParticle {
 }
 
 function updateAndDrawSmoke() {
-    // Spawn new smoke
     if (Math.random() < 0.15) {
         smokeParticles.push(new SmokeParticle());
     }
-    // Update and draw
     for (let i = smokeParticles.length - 1; i >= 0; i--) {
         smokeParticles[i].update();
         smokeParticles[i].draw();
@@ -225,35 +606,35 @@ function updateAndDrawSmoke() {
     }
 }
 
-// B3: Coop glow
+// Coop glow
 function drawCoopGlow() {
     const time = Date.now() / 1000;
     const pulse = 0.5 + Math.sin(time * 2) * 0.15;
     ctx.save();
     const gradient = ctx.createRadialGradient(
         coop.x + coop.width / 2, coop.y + coop.height / 2, 10,
-        coop.x + coop.width / 2, coop.y + coop.height / 2, coop.width * 0.8
+        coop.x + coop.width / 2, coop.y + coop.height / 2, coop.width * 0.9
     );
-    gradient.addColorStop(0, `rgba(255, 215, 0, ${pulse * 0.3})`);
+    gradient.addColorStop(0, `rgba(255, 215, 0, ${pulse * 0.32})`);
     gradient.addColorStop(1, 'rgba(255, 215, 0, 0)');
     ctx.fillStyle = gradient;
     ctx.beginPath();
-    ctx.arc(coop.x + coop.width / 2, coop.y + coop.height / 2, coop.width * 0.8, 0, Math.PI * 2);
+    ctx.arc(coop.x + coop.width / 2, coop.y + coop.height / 2, coop.width * 0.9, 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
 }
 
-// C1: Cloud shadows (parallax)
+// Cloud shadows (parallax across the world)
 let cloudShadows = [];
 function generateCloudShadows() {
     cloudShadows = [];
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 8; i++) {
         cloudShadows.push({
-            x: Math.random() * SCREEN_WIDTH * 1.5,
-            y: Math.random() * SCREEN_HEIGHT,
-            width: 120 + Math.random() * 150,
-            height: 60 + Math.random() * 40,
-            speed: 0.15 + Math.random() * 0.2
+            x: Math.random() * WORLD_WIDTH,
+            y: Math.random() * WORLD_HEIGHT,
+            width: 140 + Math.random() * 180,
+            height: 70 + Math.random() * 50,
+            speed: 0.2 + Math.random() * 0.25
         });
     }
 }
@@ -263,9 +644,9 @@ function drawCloudShadows() {
     ctx.fillStyle = 'rgba(0, 0, 0, 0.06)';
     cloudShadows.forEach(cloud => {
         cloud.x += cloud.speed;
-        if (cloud.x > SCREEN_WIDTH + cloud.width) {
+        if (cloud.x > WORLD_WIDTH + cloud.width) {
             cloud.x = -cloud.width;
-            cloud.y = Math.random() * SCREEN_HEIGHT;
+            cloud.y = Math.random() * WORLD_HEIGHT;
         }
         ctx.beginPath();
         ctx.ellipse(cloud.x, cloud.y, cloud.width / 2, cloud.height / 2, 0, 0, Math.PI * 2);
@@ -274,40 +655,42 @@ function drawCloudShadows() {
     ctx.restore();
 }
 
-// C2: Natural border (hedge)
+// Natural border (hedge around WORLD_WIDTH x WORLD_HEIGHT)
 function drawBorder() {
     ctx.save();
-    const borderWidth = 12;
-    // Draw textured hedge border around edges
-    for (let i = 0; i < SCREEN_WIDTH; i += 8) {
-        const topH = borderWidth + Math.sin(i * 0.15) * 3;
-        const botH = borderWidth + Math.cos(i * 0.12) * 3;
-        // Top
-        ctx.fillStyle = `hsl(${120 + Math.sin(i * 0.1) * 10}, 50%, ${25 + Math.sin(i * 0.2) * 5}%)`;
-        ctx.fillRect(i, 0, 8, topH);
-        // Bottom
-        ctx.fillStyle = `hsl(${120 + Math.cos(i * 0.1) * 10}, 50%, ${25 + Math.cos(i * 0.2) * 5}%)`;
-        ctx.fillRect(i, SCREEN_HEIGHT - botH, 8, botH);
+    const borderWidth = 14;
+    const startX = Math.max(0, Math.floor(camera.x / 8) * 8);
+    const endX = Math.min(WORLD_WIDTH, camera.x + SCREEN_WIDTH + 8);
+    const startY = Math.max(0, Math.floor(camera.y / 8) * 8);
+    const endY = Math.min(WORLD_HEIGHT, camera.y + SCREEN_HEIGHT + 8);
+
+    if (camera.y < 30) {
+        for (let i = startX; i < endX; i += 8) {
+            const topH = borderWidth + Math.sin(i * 0.15) * 3;
+            ctx.fillStyle = `hsl(${120 + Math.sin(i * 0.1) * 10}, 50%, ${25 + Math.sin(i * 0.2) * 5}%)`;
+            ctx.fillRect(i, 0, 8, topH);
+        }
     }
-    for (let j = 0; j < SCREEN_HEIGHT; j += 8) {
-        const leftW = borderWidth + Math.sin(j * 0.15) * 3;
-        const rightW = borderWidth + Math.cos(j * 0.12) * 3;
-        // Left
-        ctx.fillStyle = `hsl(${120 + Math.sin(j * 0.1) * 10}, 50%, ${25 + Math.sin(j * 0.2) * 5}%)`;
-        ctx.fillRect(0, j, leftW, 8);
-        // Right
-        ctx.fillStyle = `hsl(${120 + Math.cos(j * 0.1) * 10}, 50%, ${25 + Math.cos(j * 0.2) * 5}%)`;
-        ctx.fillRect(SCREEN_WIDTH - rightW, j, rightW, 8);
+    if (camera.y + SCREEN_HEIGHT > WORLD_HEIGHT - 30) {
+        for (let i = startX; i < endX; i += 8) {
+            const botH = borderWidth + Math.cos(i * 0.12) * 3;
+            ctx.fillStyle = `hsl(${120 + Math.cos(i * 0.1) * 10}, 50%, ${25 + Math.cos(i * 0.2) * 5}%)`;
+            ctx.fillRect(i, WORLD_HEIGHT - botH, 8, botH);
+        }
     }
-    // Lighter leaf highlights
-    for (let i = 0; i < SCREEN_WIDTH; i += 12) {
-        ctx.fillStyle = `rgba(100, 200, 100, ${0.3 + Math.random() * 0.2})`;
-        ctx.beginPath();
-        ctx.arc(i + 4, 5 + Math.sin(i * 0.2) * 2, 3, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.beginPath();
-        ctx.arc(i + 4, SCREEN_HEIGHT - 5 + Math.cos(i * 0.2) * 2, 3, 0, Math.PI * 2);
-        ctx.fill();
+    if (camera.x < 30) {
+        for (let j = startY; j < endY; j += 8) {
+            const leftW = borderWidth + Math.sin(j * 0.15) * 3;
+            ctx.fillStyle = `hsl(${120 + Math.sin(j * 0.1) * 10}, 50%, ${25 + Math.sin(j * 0.2) * 5}%)`;
+            ctx.fillRect(0, j, leftW, 8);
+        }
+    }
+    if (camera.x + SCREEN_WIDTH > WORLD_WIDTH - 30) {
+        for (let j = startY; j < endY; j += 8) {
+            const rightW = borderWidth + Math.cos(j * 0.12) * 3;
+            ctx.fillStyle = `hsl(${120 + Math.cos(j * 0.1) * 10}, 50%, ${25 + Math.cos(j * 0.2) * 5}%)`;
+            ctx.fillRect(WORLD_WIDTH - rightW, j, rightW, 8);
+        }
     }
     ctx.restore();
 }
@@ -322,20 +705,21 @@ class Particle {
         this.dx = Math.cos(angle) * speed;
         this.dy = Math.sin(angle) * speed;
         this.life = 100;
+        this.maxLife = 100;
         this.alpha = 1;
     }
 
     update() {
         this.x += this.dx;
         this.y += this.dy;
-        this.dy += 0.1; // gravity
+        this.dy += 0.1;
         this.life--;
-        this.alpha = this.life / 100;
+        this.alpha = this.life / this.maxLife;
     }
 
     draw() {
         ctx.save();
-        ctx.globalAlpha = this.alpha;
+        ctx.globalAlpha = Math.max(0, this.alpha);
         ctx.fillStyle = this.color;
         ctx.beginPath();
         ctx.arc(this.x, this.y, 3, 0, Math.PI * 2);
@@ -359,7 +743,7 @@ class FloatingText {
     }
     draw() {
         ctx.save();
-        ctx.globalAlpha = this.life / 60;
+        ctx.globalAlpha = Math.max(0, this.life / 60);
         ctx.fillStyle = this.color;
         ctx.font = 'bold 20px Outfit';
         ctx.fillText(this.text, this.x, this.y);
@@ -368,16 +752,17 @@ class FloatingText {
 }
 
 function spawnCaptureParticles(x, y) {
-    for (let i = 0; i < 10; i++) {
-        const p = new Particle(x, y, '#FFD700'); // Gold sparks
-        p.life = 30; // Shorter life
+    for (let i = 0; i < 12; i++) {
+        const p = new Particle(x, y, '#FFD700');
+        p.life = 30;
+        p.maxLife = 30;
         particles.push(p);
     }
 }
 
 function spawnFirework() {
-    const x = Math.random() * SCREEN_WIDTH;
-    const y = Math.random() * (SCREEN_HEIGHT / 2); // Top half
+    const x = camera.x + Math.random() * SCREEN_WIDTH;
+    const y = camera.y + Math.random() * (SCREEN_HEIGHT / 2);
     const colors = ['#ff0000', '#00ff00', '#0000ff', '#ffff00', '#ff00ff', '#00ffff'];
     const color = colors[Math.floor(Math.random() * colors.length)];
 
@@ -385,21 +770,6 @@ function spawnFirework() {
         particles.push(new Particle(x, y, color));
     }
 }
-
-// Positions calibrated to match background.png (1188x891 → 800x600)
-const house = {
-    x: 175,
-    y: 87,
-    width: 145,
-    height: 175
-};
-
-const coop = {
-    x: 428,
-    y: 34,
-    width: 125,
-    height: 155
-};
 
 class Animal {
     constructor(type = 'rabbit') {
@@ -409,36 +779,45 @@ class Animal {
         } else {
             this.points = (type === 'chicken') ? 2 : 1;
         }
-        this.lifeTime = (type === 'golden') ? 300 : -1; // 5 seconds (60fps) for golden
+        this.lifeTime = (type === 'golden') ? 450 : -1; // 7.5s for golden on larger map
         this.removed = false;
+        this.animPhase = Math.random() * Math.PI * 2;
         this.reset();
     }
 
     reset() {
-        // Spawn somewhere random away from edges and house/coop
-        this.x = 200 + Math.random() * (SCREEN_WIDTH - 400);
-        this.y = 100 + Math.random() * (SCREEN_HEIGHT - 200);
         this.width = 40;
         this.height = 40;
 
+        // Find a valid spawn position not colliding with obstacles or river
+        let attempts = 0;
+        do {
+            this.x = 60 + Math.random() * (WORLD_WIDTH - 120);
+            this.y = 60 + Math.random() * (WORLD_HEIGHT - 120);
+            attempts++;
+        } while (
+            attempts < 40 &&
+            (collidesWithEnvironment(this.x, this.y, this.width, this.height) ||
+             rectsOverlap(this.x, this.y, this.width, this.height, coop.x, coop.y, coop.width, coop.height, 40))
+        );
+
         if (this.type === 'golden') {
-            this.speed = 3.0; // Very fast
+            this.speed = 3.2;
         } else {
-            this.speed = (this.type === 'chicken') ? 1.0 : 0.8;
+            this.speed = (this.type === 'chicken') ? 1.0 : 0.85;
         }
 
-        this.dx = (Math.random() - 0.5) * this.speed;
-        this.dy = (Math.random() - 0.5) * this.speed;
+        const angle = Math.random() * Math.PI * 2;
+        this.dx = Math.cos(angle) * this.speed;
+        this.dy = Math.sin(angle) * this.speed;
         this.changeDirTimer = 0;
         this.captured = false;
+        this.fleeing = false;
     }
 
     update() {
         if (this.captured) {
-            // Wandering inside coop
-            const speed = 0.5; // Very slow
-
-            // Change direction occasionally
+            const speed = 0.5;
             this.changeDirTimer++;
             if (this.changeDirTimer > 100 + Math.random() * 100) {
                 const angle = Math.random() * Math.PI * 2;
@@ -450,33 +829,27 @@ class Animal {
             this.x += this.dx;
             this.y += this.dy;
 
-            // Stay inside coop boundaries
-            const margin = 5;
-            if (this.x < coop.x + margin) {
-                this.x = coop.x + margin;
-                this.dx = Math.abs(this.dx);
-            }
-            if (this.x + this.width > coop.x + coop.width - margin) {
-                this.x = coop.x + coop.width - this.width - margin;
-                this.dx = -Math.abs(this.dx);
-            }
-            if (this.y < coop.y + margin) {
-                this.y = coop.y + margin;
-                this.dy = Math.abs(this.dy);
-            }
-            if (this.y + this.height > coop.y + coop.height - margin) {
-                this.y = coop.y + coop.height - this.height - margin;
-                this.dy = -Math.abs(this.dy);
-            }
+            const margin = 8;
+            if (this.x < coop.x + margin) { this.x = coop.x + margin; this.dx = Math.abs(this.dx); }
+            if (this.x + this.width > coop.x + coop.width - margin) { this.x = coop.x + coop.width - this.width - margin; this.dx = -Math.abs(this.dx); }
+            if (this.y < coop.y + margin) { this.y = coop.y + margin; this.dy = Math.abs(this.dy); }
+            if (this.y + this.height > coop.y + coop.height - margin) { this.y = coop.y + coop.height - this.height - margin; this.dy = -Math.abs(this.dy); }
             return;
         }
 
-        // Golden Chicken Logic
+        // Golden Chicken Logic + sparkle trail
         if (this.type === 'golden') {
             this.lifeTime--;
+            if (Math.random() < 0.35) {
+                const spark = new Particle(this.x + 20, this.y + 20, '#ffd700');
+                spark.dx *= 0.3;
+                spark.dy *= 0.3;
+                spark.life = 20;
+                spark.maxLife = 20;
+                particles.push(spark);
+            }
             if (this.lifeTime <= 0) {
-                // Poof! it vanishes
-                spawnCaptureParticles(this.x, this.y); // Visual effect on vanish
+                spawnCaptureParticles(this.x, this.y);
                 this.removed = true;
                 return;
             }
@@ -487,15 +860,14 @@ class Animal {
         const dy = (this.y + this.height / 2) - (player.y + player.height / 2);
         const dist = Math.sqrt(dx * dx + dy * dy);
 
-        // Flee behavior
-        if (dist < 150) {
-            // Run away!
+        if (dist < 160) {
+            this.fleeing = true;
             const angle = Math.atan2(dy, dx);
-            this.dx = Math.cos(angle) * this.speed * 2.5;
-            this.dy = Math.sin(angle) * this.speed * 2.5;
+            this.dx = Math.cos(angle) * this.speed * 2.4;
+            this.dy = Math.sin(angle) * this.speed * 2.4;
             this.changeDirTimer = 0;
         } else {
-            // Normal wandering
+            this.fleeing = false;
             this.changeDirTimer++;
             if (this.changeDirTimer > 60 + Math.random() * 60) {
                 const angle = Math.random() * Math.PI * 2;
@@ -505,129 +877,176 @@ class Animal {
             }
         }
 
-        // Apply movement
-        this.x += this.dx;
-        this.y += this.dy;
+        // Move with obstacle & river avoidance (slide/bounce)
+        const nextX = this.x + this.dx;
+        if (!collidesWithEnvironment(nextX, this.y, this.width, this.height)) {
+            this.x = nextX;
+        } else {
+            this.dx = -this.dx;
+        }
 
-        // Bounce off walls with margin to prevent sticking
-        const margin = 10;
-        if (this.x < margin) {
-            this.x = margin;
-            this.dx = Math.abs(this.dx);
-        }
-        if (this.x + this.width > SCREEN_WIDTH - margin) {
-            this.x = SCREEN_WIDTH - this.width - margin;
-            this.dx = -Math.abs(this.dx);
-        }
-        if (this.y < margin) {
-            this.y = margin;
-            this.dy = Math.abs(this.dy);
-        }
-        if (this.y + this.height > SCREEN_HEIGHT - margin) {
-            this.y = SCREEN_HEIGHT - this.height - margin;
-            this.dy = -Math.abs(this.dy);
+        const nextY = this.y + this.dy;
+        if (!collidesWithEnvironment(this.x, nextY, this.width, this.height)) {
+            this.y = nextY;
+        } else {
+            this.dy = -this.dy;
         }
     }
+
     draw() {
-        // Always draw normally using current x,y
         let img = animalImg;
         if (this.type === 'chicken') img = chickenImg;
         if (this.type === 'golden') img = goldenImg;
 
-        // Use simpler size if captured to fit in potentially crowded coop?  
         const size = this.captured ? 32 : 48;
-        // Bobbing animation
-        const bob = Math.sin(Date.now() / 200) * 3;
+        const t = Date.now() / 1000 + this.animPhase;
         const flipX = this.dx < 0;
-        safeDrawImage(img, this.x, this.y + (this.captured ? 0 : bob), size, size, flipX);
+
+        let offsetY = 0;
+        let rot = 0;
+        let scaleX = 1;
+        let scaleY = 1;
+
+        if (!this.captured) {
+            if (this.type === 'rabbit') {
+                // Hopping cycle
+                const hop = Math.abs(Math.sin(t * (this.fleeing ? 9 : 4.5)));
+                offsetY = -hop * (this.fleeing ? 10 : 6);
+                scaleY = 0.9 + hop * 0.2;
+                scaleX = 1.1 - hop * 0.15;
+            } else {
+                // Chicken pecking / fluttering
+                if (this.fleeing) {
+                    offsetY = Math.sin(t * 14) * 4;
+                    rot = Math.sin(t * 14) * 0.14;
+                } else {
+                    const peck = Math.sin(t * 3);
+                    if (peck > 0.7) {
+                        rot = (flipX ? -1 : 1) * 0.25;
+                        offsetY = 3;
+                    } else {
+                        offsetY = Math.sin(t * 6) * 2;
+                    }
+                }
+            }
+        }
+
+        ctx.save();
+        if (this.type === 'golden' && !this.captured) {
+            const glow = 12 + Math.sin(t * 6) * 6;
+            ctx.shadowBlur = glow;
+            ctx.shadowColor = '#ffd700';
+        }
+        safeDrawAnimatedImage(img, this.x, this.y + offsetY, size, size, flipX, rot, scaleX, scaleY);
+        ctx.restore();
     }
 }
 
 class Fox {
     constructor() {
-        // Start at random edge
+        // Start at random edge of the world
         if (Math.random() < 0.5) {
-            this.x = (Math.random() < 0.5) ? -50 : SCREEN_WIDTH + 50;
-            this.y = Math.random() * SCREEN_HEIGHT;
+            this.x = (Math.random() < 0.5) ? -50 : WORLD_WIDTH + 50;
+            this.y = Math.random() * WORLD_HEIGHT;
         } else {
-            this.x = Math.random() * SCREEN_WIDTH;
-            this.y = (Math.random() < 0.5) ? -50 : SCREEN_HEIGHT + 50;
+            this.x = Math.random() * WORLD_WIDTH;
+            this.y = (Math.random() < 0.5) ? -50 : WORLD_HEIGHT + 50;
         }
 
         this.width = 50;
         this.height = 50;
-        this.speed = 0.8; // Reduced speed
-        this.state = 'hunting'; // or 'fleeing'
-        this.fleeTimer = 0;
+        this.speed = 0.95;
+        this.state = 'hunting';
+        this.movingLeft = false;
+        this.distToCoop = 999;
     }
 
     update() {
         if (this.state === 'hunting') {
-            // Move towards coop
             const dx = coop.x + coop.width / 2 - this.x;
             const dy = coop.y + coop.height / 2 - this.y;
+            this.distToCoop = Math.sqrt(dx * dx + dy * dy);
             const angle = Math.atan2(dy, dx);
-            this.x += Math.cos(angle) * this.speed;
-            this.y += Math.sin(angle) * this.speed;
-            this.movingLeft = Math.cos(angle) < 0;
 
-            // Check collision with player (Player scares fox)
-            if (
-                player.x < this.x + this.width &&
-                player.x + player.width > this.x &&
-                player.y < this.y + this.height &&
-                player.y + player.height > this.y
-            ) {
+            const stepX = Math.cos(angle) * this.speed;
+            const stepY = Math.sin(angle) * this.speed;
+            this.movingLeft = stepX < 0;
+
+            // Simple obstacle avoidance (foxes can swim/jump river if needed, only avoid rocks/trees)
+            const nextX = this.x + stepX;
+            if (!collidesWithEnvironment(nextX, this.y, this.width, this.height, true)) {
+                this.x = nextX;
+            } else {
+                this.y += (stepY >= 0 ? 1 : -1) * this.speed;
+            }
+
+            const nextY = this.y + stepY;
+            if (!collidesWithEnvironment(this.x, nextY, this.width, this.height, true)) {
+                this.y = nextY;
+            } else {
+                this.x += (stepX >= 0 ? 1 : -1) * this.speed;
+            }
+
+            // Player scares fox
+            if (rectsOverlap(player.x, player.y, player.width, player.height, this.x, this.y, this.width, this.height)) {
                 this.state = 'fleeing';
-                // Optional: Play scare sound
             }
 
-            // Check collision with coop (Steal chicken!)
-            const distToCoop = Math.sqrt(dx * dx + dy * dy);
-            if (distToCoop < 50) {
-                // Steal!
+            // Steal chicken from coop
+            if (this.distToCoop < 55) {
                 if (score > 0) {
-                    score = Math.max(0, score - 2); // Lose 2 points
-                    floatingTexts.push(new FloatingText(this.x, this.y, "-2", "red"));
-                    triggerShake(); // NEW: Trigger camera shake on steal
+                    score = Math.max(0, score - 2);
+                    floatingTexts.push(new FloatingText(this.x, this.y, "-2", "#ff4757"));
+                    triggerShake();
                 }
-                this.state = 'fleeing'; // Mission accomplished, run away
+                this.state = 'fleeing';
             }
-
         } else if (this.state === 'fleeing') {
-            // Run away from coop/player
             const dx = this.x - (coop.x + coop.width / 2);
             const dy = this.y - (coop.y + coop.height / 2);
-            const angle = Math.atan2(dy, dx); // Run directly away from coop center
-            this.x += Math.cos(angle) * (this.speed * 2);
-            this.y += Math.sin(angle) * (this.speed * 2);
+            const angle = Math.atan2(dy, dx);
+            this.x += Math.cos(angle) * (this.speed * 2.1);
+            this.y += Math.sin(angle) * (this.speed * 2.1);
             this.movingLeft = Math.cos(angle) < 0;
         }
     }
 
     draw() {
-        const bob = Math.sin(Date.now() / 150) * 4; // Faster bob for fox
-        safeDrawImage(foxImg, this.x, this.y + bob, this.width, this.height, this.movingLeft);
+        const t = Date.now() / 120;
+        const bob = Math.sin(t) * 4;
+        const rot = Math.sin(t) * 0.08;
+        safeDrawAnimatedImage(foxImg, this.x, this.y + bob, this.width, this.height, this.movingLeft, rot, 1.04, 0.96);
+
+        // Glowing red eyes when hunting near the coop
+        if (this.state === 'hunting' && this.distToCoop < 300) {
+            ctx.save();
+            const eyeX = this.x + (this.movingLeft ? 13 : 33);
+            const eyeY = this.y + bob + 16;
+            ctx.fillStyle = '#ff2e2e';
+            ctx.shadowBlur = 10;
+            ctx.shadowColor = '#ff0000';
+            ctx.beginPath();
+            ctx.arc(eyeX, eyeY, 2.5, 0, Math.PI * 2);
+            ctx.arc(eyeX + (this.movingLeft ? 5 : -5), eyeY, 2.5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+        }
     }
 }
 
-// Sound effect
+// Sound effects
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 function playCaptureSound() {
     if (audioCtx.state === 'suspended') audioCtx.resume();
     const oscillator = audioCtx.createOscillator();
     const gainNode = audioCtx.createGain();
-
     oscillator.type = 'sine';
-    oscillator.frequency.setValueAtTime(523.25, audioCtx.currentTime); // C5
-    oscillator.frequency.exponentialRampToValueAtTime(1046.5, audioCtx.currentTime + 0.1); // C6
-
+    oscillator.frequency.setValueAtTime(523.25, audioCtx.currentTime);
+    oscillator.frequency.exponentialRampToValueAtTime(1046.5, audioCtx.currentTime + 0.1);
     gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
     gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
-
     oscillator.connect(gainNode);
     gainNode.connect(audioCtx.destination);
-
     oscillator.start();
     oscillator.stop(audioCtx.currentTime + 0.1);
 }
@@ -661,9 +1080,6 @@ function playGoldenSound() {
 
 function playBarkSound() {
     if (audioCtx.state === 'suspended') audioCtx.resume();
-
-    // Use the high-quality external WAV for the bark
-    // We clone it to allow overlapping barks if needed, though here it's simple
     const sound = dogBarkAudio.cloneNode();
     sound.volume = 0.3;
     sound.play().catch(e => console.error("Error playing bark sound:", e));
@@ -694,50 +1110,51 @@ class Dog {
         this.y = player.y + 10;
         this.width = 32;
         this.height = 32;
-        this.speed = 3.5;
         this.barkCooldown = 0;
         this.facingLeft = false;
+        this.isMoving = false;
     }
     update() {
-        // Follow player with a slight delay/distance
-        const targetX = player.x - 20;
-        const targetY = player.y + 10;
+        const targetX = player.x - 24;
+        const targetY = player.y + 12;
         const dx = targetX - this.x;
         const dy = targetY - this.y;
         const dist = Math.sqrt(dx * dx + dy * dy);
 
-        if (dist > 5) {
+        if (dist > 6) {
+            this.isMoving = true;
             this.x += dx * 0.1;
             this.y += dy * 0.1;
             if (dx < -0.5) this.facingLeft = true;
             else if (dx > 0.5) this.facingLeft = false;
+        } else {
+            this.isMoving = false;
         }
 
         if (this.barkCooldown > 0) this.barkCooldown--;
 
-        // Scare foxes
         foxes.forEach(fox => {
             if (fox.state === 'hunting') {
                 const fdx = fox.x - this.x;
                 const fdy = fox.y - this.y;
                 const fdist = Math.sqrt(fdx * fdx + fdy * fdy);
-                if (fdist < 100 && this.barkCooldown === 0) {
+                if (fdist < 110 && this.barkCooldown === 0) {
                     fox.state = 'fleeing';
                     playBarkSound();
                     floatingTexts.push(new FloatingText(this.x, this.y - 20, "WOUF!", "#ffffff"));
-                    this.barkCooldown = 120; // 2 seconds
+                    this.barkCooldown = 120;
                 }
             }
         });
     }
     draw() {
+        const bob = this.isMoving ? Math.abs(Math.sin(Date.now() / 90)) * -4 : 0;
         if (dogImg.complete && dogImg.naturalWidth !== 0) {
-            safeDrawImage(dogImg, this.x, this.y, this.width, this.height, this.facingLeft);
+            safeDrawAnimatedImage(dogImg, this.x, this.y + bob, this.width, this.height, this.facingLeft);
         } else {
-            // Placeholder: brown circle
             ctx.fillStyle = '#8B4513';
             ctx.beginPath();
-            ctx.arc(this.x + 16, this.y + 16, 12, 0, Math.PI * 2);
+            ctx.arc(this.x + 16, this.y + 16 + bob, 12, 0, Math.PI * 2);
             ctx.fill();
         }
     }
@@ -745,17 +1162,22 @@ class Dog {
 
 class PowerUp {
     constructor() {
-        this.x = 100 + Math.random() * (SCREEN_WIDTH - 200);
-        this.y = 100 + Math.random() * (SCREEN_HEIGHT - 200);
+        let attempts = 0;
+        do {
+            this.x = 80 + Math.random() * (WORLD_WIDTH - 160);
+            this.y = 80 + Math.random() * (WORLD_HEIGHT - 160);
+            attempts++;
+        } while (attempts < 30 && collidesWithEnvironment(this.x, this.y, 30, 30));
         this.width = 30;
         this.height = 30;
-        this.life = 600; // 10 seconds
+        this.life = 700;
     }
     draw() {
         this.life--;
         ctx.save();
-        const pulse = Math.sin(Date.now() / 100) * 5;
-        // Draw simple lightning bolt/star
+        const pulse = Math.sin(Date.now() / 100) * 4;
+        ctx.shadowBlur = 12;
+        ctx.shadowColor = 'yellow';
         ctx.fillStyle = '#fffa65';
         ctx.beginPath();
         ctx.moveTo(this.x + 15, this.y + pulse);
@@ -766,45 +1188,16 @@ class PowerUp {
         ctx.lineTo(this.x + 15, this.y + 10 + pulse);
         ctx.closePath();
         ctx.fill();
-        // Shadow/Glow
-        ctx.shadowBlur = 10;
-        ctx.shadowColor = 'yellow';
         ctx.restore();
     }
 }
 
-// Create a few animals
+// Animals array
 let animals = [];
 function spawnAnimals(count) {
     for (let i = 0; i < count; i++) {
-        const type = (Math.random() > 0.5) ? 'chicken' : 'rabbit';
+        const type = (Math.random() > 0.45) ? 'chicken' : 'rabbit';
         animals.push(new Animal(type));
-    }
-}
-spawnAnimals(5); // Initial spawn
-
-// Respawn button logic
-// Respawn button logic
-function respawnRabbits() {
-    if (gameWon) return; // No more spawning if won
-
-    // Count active (not captured) animals
-    const activeCount = animals.filter(a => !a.captured).length;
-    const maxAnimals = 10;
-
-    if (activeCount >= maxAnimals) {
-        // Optional: Provide visual feedback or just do nothing
-        console.log("Too many animals!");
-        return;
-    }
-
-    // Spawn only enough to reach max or a small batch, let's just spawn a standard batch but cap it
-    const count = 3 + Math.floor(Math.random() * 3); // 3 to 5
-    // Only add what fits under the limit
-    const numToSpawn = Math.min(count, maxAnimals - activeCount);
-
-    if (numToSpawn > 0) {
-        spawnAnimals(numToSpawn);
     }
 }
 
@@ -821,7 +1214,6 @@ function saveHighScore() {
         time: (elapsedTime / 1000).toFixed(1),
         date: new Date().toLocaleDateString()
     });
-    // Sort by best time (ascending) and keep top 10
     scores.sort((a, b) => parseFloat(a.time) - parseFloat(b.time));
     localStorage.setItem('forestGameScores', JSON.stringify(scores.slice(0, 10)));
     displayHighScores();
@@ -901,10 +1293,10 @@ function startCountdown() {
     isCountingDown = true;
     countdown = 3;
     countdownTimer = Date.now();
+    screenFade = 1.0;
     playCountdownSound(false);
-    resetGame(false); // Prepare world but don't start isPlaying
+    resetGame(false);
 
-    // Update HUD visibility
     hudElement.classList.remove('hidden');
     mainTitle.classList.add('hidden');
     hudPlayerName.innerText = playerName;
@@ -919,10 +1311,13 @@ function resetGame(shouldStart = true) {
     particles = [];
     foxes = [];
     floatingTexts = [];
+    footprints = [];
     powerups = [];
     speedBoostTimer = 0;
-    player.speed = 4; // Reset to normal speed
+    player.speed = normalSpeed;
     player.facingLeft = false;
+    player.isMoving = false;
+    player.walkTimer = 0;
 
     document.getElementById('victory-screen').classList.add('hidden');
 
@@ -936,24 +1331,25 @@ function resetGame(shouldStart = true) {
         elapsedTime = 0;
     }
 
+    // Player starts near house
+    player.x = house.x + house.width / 2 - player.width / 2;
+    player.y = house.y + house.height + 10;
+
+    // Snap camera immediately on player at start
+    camera.x = Math.max(0, Math.min(WORLD_WIDTH - SCREEN_WIDTH, player.x + player.width / 2 - SCREEN_WIDTH / 2));
+    camera.y = Math.max(0, Math.min(WORLD_HEIGHT - SCREEN_HEIGHT, player.y + player.height / 2 - SCREEN_HEIGHT / 2));
+
     dog = new Dog();
 
-    // Player starts at house
-    player.x = house.x + house.width / 2 - player.width / 2;
-    player.y = house.y + house.height - 10;
-
-    animals = [];
-    spawnAnimals(5);
-
-    // Generate environment graphics
+    generateObstacles();
     generateFoliage();
     generateCloudShadows();
+    initWeather();
     smokeParticles = [];
+
+    animals = [];
+    spawnAnimals(12); // More animals across the expanded 1600x1200 world
 }
-
-// Initialize but wait for start
-// resetGame(); is called by startGame
-
 
 // Pause handling
 let pauseStartTime = 0;
@@ -979,29 +1375,22 @@ window.addEventListener('keyup', (e) => {
     keys[e.code] = false;
 });
 
-
-// Helper to safely draw images (with optional horizontal flip)
-function safeDrawImage(img, x, y, w, h, flipX = false) {
+// Helper to safely draw animated images (flip + rotation + squash & stretch)
+function safeDrawAnimatedImage(img, x, y, w, h, flipX = false, rotation = 0, scaleX = 1, scaleY = 1) {
     if (img && img.complete && img.naturalWidth !== 0) {
         try {
             ctx.save();
-            ctx.globalAlpha = 1.0; // Ensure opacity is reset
-            if (flipX) {
-                ctx.translate(x + w, y);
-                ctx.scale(-1, 1);
-                ctx.drawImage(img, 0, 0, w, h);
-            } else {
-                ctx.drawImage(img, x, y, w, h);
-            }
+            ctx.translate(x + w / 2, y + h / 2);
+            if (rotation !== 0) ctx.rotate(rotation);
+            ctx.scale(flipX ? -scaleX : scaleX, scaleY);
+            ctx.drawImage(img, -w / 2, -h / 2, w, h);
             ctx.restore();
         } catch (e) {
             console.error("Error drawing image:", img.src, e);
-            // Fallback rectangle
             ctx.fillStyle = 'magenta';
             ctx.fillRect(x, y, w, h);
         }
     } else {
-        // Fallback placeholder while loading
         ctx.fillStyle = 'rgba(100, 100, 100, 0.5)';
         ctx.fillRect(x, y, w, h);
     }
@@ -1010,29 +1399,36 @@ function safeDrawImage(img, x, y, w, h, flipX = false) {
 // Gamepad Support
 function handleGamepad() {
     const gamepads = navigator.getGamepads();
-    const gp = gamepads[0]; // Take first gamepad
+    const gp = gamepads[0];
     if (!gp) {
         gamepadState = {};
         return;
     }
 
-    // Movement (Axes 0 and 1 are usually the left stick)
-    const threshold = 0.25; // Larger deadzone for reliability
-
+    const threshold = 0.25;
     gamepadState['ArrowLeft'] = gp.axes[0] < -threshold;
     gamepadState['ArrowRight'] = gp.axes[0] > threshold;
     gamepadState['ArrowUp'] = gp.axes[1] < -threshold;
     gamepadState['ArrowDown'] = gp.axes[1] > threshold;
 
-    // Buttons
-    // Button 0 (A/Cross) to start or restart
     if (gp.buttons[0] && gp.buttons[0].pressed) {
         if (!isPlaying && !gameWon) startGame();
         else if (gameWon) startCountdown();
     }
 }
 
+function updateCamera() {
+    const targetCamX = Math.max(0, Math.min(WORLD_WIDTH - SCREEN_WIDTH, player.x + player.width / 2 - SCREEN_WIDTH / 2));
+    const targetCamY = Math.max(0, Math.min(WORLD_HEIGHT - SCREEN_HEIGHT, player.y + player.height / 2 - SCREEN_HEIGHT / 2));
+    camera.x += (targetCamX - camera.x) * 0.12;
+    camera.y += (targetCamY - camera.y) * 0.12;
+}
+
 function update() {
+    if (screenFade > 0) {
+        screenFade = Math.max(0, screenFade - 0.04);
+    }
+
     if (isCountingDown) {
         const now = Date.now();
         if (now - countdownTimer >= 1000) {
@@ -1048,6 +1444,7 @@ function update() {
             }
         }
         handleGamepad();
+        updateCamera();
         return;
     }
 
@@ -1068,17 +1465,17 @@ function update() {
         elapsedTime = Date.now() - startTime;
     }
 
-    if (Math.random() < 0.008 && foxes.length < 2) {
+    if (Math.random() < 0.008 && foxes.length < 3) {
         foxes.push(new Fox());
         playFoxSound();
     }
 
-    if (Math.random() < 0.001) {
+    if (Math.random() < 0.0014) {
         animals.push(new Animal('golden'));
         playGoldenSound();
     }
 
-    if (Math.random() < 0.002 && powerups.length < 1) {
+    if (Math.random() < 0.0025 && powerups.length < 2) {
         powerups.push(new PowerUp());
     }
 
@@ -1091,15 +1488,15 @@ function update() {
 
     for (let i = foxes.length - 1; i >= 0; i--) {
         foxes[i].update();
-        if (foxes[i].x < -100 || foxes[i].x > SCREEN_WIDTH + 100 ||
-            foxes[i].y < -100 || foxes[i].y > SCREEN_HEIGHT + 100) {
+        if (foxes[i].x < -120 || foxes[i].x > WORLD_WIDTH + 120 ||
+            foxes[i].y < -120 || foxes[i].y > WORLD_HEIGHT + 120) {
             foxes.splice(i, 1);
         }
     }
 
     const activeAnimals = animals.filter(a => !a.captured).length;
-    if (activeAnimals <= 2) {
-        spawnAnimals(3 + Math.floor(Math.random() * 3));
+    if (activeAnimals <= 5) {
+        spawnAnimals(4 + Math.floor(Math.random() * 3));
     }
 
     // Directional inputs (Arrows + ZQSD / WASD + Gamepad)
@@ -1115,29 +1512,55 @@ function update() {
     if (left) moveX -= 1;
     if (right) moveX += 1;
 
-    // Diagonal normalization to keep constant speed
+    player.isMoving = (moveX !== 0 || moveY !== 0);
+
     if (moveX !== 0 && moveY !== 0) {
         const inv = 1 / Math.SQRT2;
         moveX *= inv;
         moveY *= inv;
     }
 
-    player.x += moveX * player.speed;
-    player.y += moveY * player.speed;
+    if (player.isMoving) {
+        player.walkTimer += 0.25;
+        player.stepTimer++;
+        if (player.stepTimer >= 10) {
+            player.stepTimer = 0;
+            const footSide = (Math.floor(player.walkTimer) % 2 === 0) ? -5 : 5;
+            footprints.push(new Footprint(
+                player.x + player.width / 2 + footSide,
+                player.y + player.height - 4,
+                Math.atan2(moveY, moveX)
+            ));
+        }
+
+        const nextX = player.x + moveX * player.speed;
+        if (!collidesWithEnvironment(nextX, player.y, player.width, player.height)) {
+            player.x = nextX;
+        }
+        const nextY = player.y + moveY * player.speed;
+        if (!collidesWithEnvironment(player.x, nextY, player.width, player.height)) {
+            player.y = nextY;
+        }
+    } else {
+        player.walkTimer = 0;
+    }
 
     if (moveX < -0.1) player.facingLeft = true;
     else if (moveX > 0.1) player.facingLeft = false;
 
-    if (player.x < 0) player.x = 0;
-    if (player.y < 0) player.y = 0;
-    if (player.x + player.width > SCREEN_WIDTH) player.x = SCREEN_WIDTH - player.width;
-    if (player.y + player.height > SCREEN_HEIGHT) player.y = SCREEN_HEIGHT - player.height;
+    updateCamera();
 
+    // Update footprints
+    for (let i = footprints.length - 1; i >= 0; i--) {
+        footprints[i].update();
+        if (footprints[i].life <= 0) footprints.splice(i, 1);
+    }
+
+    // Powerups collision
     for (let i = powerups.length - 1; i >= 0; i--) {
         const p = powerups[i];
         if (p.life <= 0) { powerups.splice(i, 1); continue; }
-        if (player.x < p.x + p.width && player.x + player.width > p.x &&
-            player.y < p.y + p.height && player.y + player.height > p.y) {
+        if (rectsOverlap(player.x, player.y, player.width, player.height, p.x, p.y, p.width, p.height)) {
             speedBoostTimer = 300;
             player.speed = boostedSpeed;
             floatingTexts.push(new FloatingText(player.x, player.y, "VITESSE MAX!", "#fffa65"));
@@ -1145,6 +1568,7 @@ function update() {
         }
     }
 
+    // Animals update & capture
     for (let i = animals.length - 1; i >= 0; i--) {
         const animal = animals[i];
         animal.update();
@@ -1154,12 +1578,9 @@ function update() {
             continue;
         }
 
-        const hitboxMargin = (animal.type === 'golden') ? 60 : 40;
+        const hitboxMargin = (animal.type === 'golden') ? 56 : 42;
         if (!animal.captured &&
-            player.x < animal.x + hitboxMargin &&
-            player.x + player.width > animal.x &&
-            player.y < animal.y + hitboxMargin &&
-            player.y + player.height > animal.y) {
+            rectsOverlap(player.x, player.y, player.width, player.height, animal.x, animal.y, hitboxMargin, hitboxMargin)) {
 
             animal.captured = true;
             animal.x = coop.x + 20 + Math.random() * (coop.width - 40);
@@ -1169,8 +1590,8 @@ function update() {
 
             score += animal.points;
             const pts = "+" + animal.points;
-            floatingTexts.push(new FloatingText(animal.x, animal.y, pts, "#FFD700"));
-            spawnCaptureParticles(animal.x, animal.y);
+            floatingTexts.push(new FloatingText(player.x, player.y - 10, pts, "#FFD700"));
+            spawnCaptureParticles(player.x + player.width / 2, player.y + player.height / 2);
             playCaptureSound();
             if (animal.type === 'chicken' || animal.type === 'golden') {
                 playChickenSound();
@@ -1178,8 +1599,7 @@ function update() {
 
             if (score >= targetScore && !gameWon) {
                 gameWon = true;
-                // Celebration phase: 2 seconds of fireworks before showing victory screen
-                for (let i = 0; i < 20; i++) {
+                for (let j = 0; j < 20; j++) {
                     setTimeout(spawnFirework, Math.random() * 2000);
                 }
                 setTimeout(() => {
@@ -1198,80 +1618,227 @@ function update() {
         particles[i].update();
         if (particles[i].life <= 0) particles.splice(i, 1);
     }
+
+    for (let i = floatingTexts.length - 1; i >= 0; i--) {
+        floatingTexts[i].update();
+        if (floatingTexts[i].life <= 0) floatingTexts.splice(i, 1);
+    }
+}
+
+// --- MINI-MAP & OFF-SCREEN INDICATORS ---
+
+function drawMiniMap() {
+    const mapW = 160;
+    const mapH = 120;
+    const mapX = SCREEN_WIDTH - mapW - 14;
+    const mapY = 14;
+    const scaleX = mapW / WORLD_WIDTH;
+    const scaleY = mapH / WORLD_HEIGHT;
+
+    ctx.save();
+    // Background
+    ctx.fillStyle = 'rgba(14, 26, 18, 0.78)';
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.roundRect(mapX, mapY, mapW, mapH, 10);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.roundRect(mapX, mapY, mapW, mapH, 10);
+    ctx.clip();
+
+    // River on minimap
+    ctx.fillStyle = 'rgba(41, 182, 246, 0.7)';
+    ctx.fillRect(mapX, mapY + river.y * scaleY, mapW, river.height * scaleY);
+
+    // Bridges on minimap
+    ctx.fillStyle = '#8d6e63';
+    bridges.forEach(b => {
+        ctx.fillRect(mapX + b.x * scaleX, mapY + b.y * scaleY, b.width * scaleX, b.height * scaleY);
+    });
+
+    // House & Coop
+    ctx.fillStyle = '#a29bfe';
+    ctx.fillRect(mapX + house.x * scaleX, mapY + house.y * scaleY, house.width * scaleX, house.height * scaleY);
+    ctx.fillStyle = '#f1c40f';
+    ctx.fillRect(mapX + coop.x * scaleX, mapY + coop.y * scaleY, coop.width * scaleX, coop.height * scaleY);
+
+    // Camera viewport frame
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.45)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(
+        mapX + camera.x * scaleX,
+        mapY + camera.y * scaleY,
+        SCREEN_WIDTH * scaleX,
+        SCREEN_HEIGHT * scaleY
+    );
+
+    // Animals
+    animals.forEach(a => {
+        if (a.captured) return;
+        ctx.fillStyle = (a.type === 'golden') ? '#ffd700' : (a.type === 'chicken' ? '#ffffff' : '#fab1a0');
+        ctx.beginPath();
+        ctx.arc(mapX + a.x * scaleX, mapY + a.y * scaleY, a.type === 'golden' ? 3.5 : 2, 0, Math.PI * 2);
+        ctx.fill();
+    });
+
+    // Foxes (red triangles)
+    foxes.forEach(f => {
+        if (f.state !== 'hunting') return;
+        const fx = mapX + f.x * scaleX;
+        const fy = mapY + f.y * scaleY;
+        ctx.fillStyle = '#ff4757';
+        ctx.beginPath();
+        ctx.moveTo(fx, fy - 4);
+        ctx.lineTo(fx - 3.5, fy + 3);
+        ctx.lineTo(fx + 3.5, fy + 3);
+        ctx.closePath();
+        ctx.fill();
+    });
+
+    // Player (bright green dot)
+    ctx.fillStyle = '#2ecc71';
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(
+        mapX + (player.x + player.width / 2) * scaleX,
+        mapY + (player.y + player.height / 2) * scaleY,
+        3.5, 0, Math.PI * 2
+    );
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.restore();
+}
+
+function drawOffscreenAlerts() {
+    // Show subtle edge arrow if a hunting fox or golden chicken is off-screen
+    const targets = [];
+    foxes.forEach(f => {
+        if (f.state === 'hunting') targets.push({ x: f.x + 25, y: f.y + 25, color: '#ff4757', label: '🦊' });
+    });
+    animals.forEach(a => {
+        if (!a.captured && a.type === 'golden') targets.push({ x: a.x + 20, y: a.y + 20, color: '#ffd700', label: '🌟' });
+    });
+
+    targets.forEach(t => {
+        const sx = t.x - camera.x;
+        const sy = t.y - camera.y;
+        if (sx >= 20 && sx <= SCREEN_WIDTH - 20 && sy >= 20 && sy <= SCREEN_HEIGHT - 20) return;
+
+        const angle = Math.atan2(sy - SCREEN_HEIGHT / 2, sx - SCREEN_WIDTH / 2);
+        const edgeX = Math.max(26, Math.min(SCREEN_WIDTH - 26, sx));
+        const edgeY = Math.max(26, Math.min(SCREEN_HEIGHT - 26, sy));
+
+        ctx.save();
+        ctx.translate(edgeX, edgeY);
+        ctx.fillStyle = t.color;
+        ctx.beginPath();
+        ctx.arc(0, 0, 14, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.font = '14px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(t.label, 0, 1);
+
+        // Directional pointer
+        ctx.rotate(angle);
+        ctx.fillStyle = t.color;
+        ctx.beginPath();
+        ctx.moveTo(20, 0);
+        ctx.lineTo(13, -5);
+        ctx.lineTo(13, 5);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+    });
 }
 
 function draw() {
-    // --- Background (composite: terrain + house + coop) ---
-    if (bgImg && bgImg.complete && bgImg.naturalWidth !== 0) {
-        ctx.drawImage(bgImg, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
-    } else {
-        ctx.fillStyle = '#4CAF50';
-        ctx.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
-    }
+    ctx.clearRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
 
-    // C1: Cloud shadows (moving over terrain)
+    // --- WORLD SPACE RENDERING (with camera offset) ---
+    ctx.save();
+    ctx.translate(-camera.x, -camera.y);
+
+    drawWorldTerrain();
     drawCloudShadows();
-
-    // B2: Dynamic Foliage (Grass, flowers & pebbles)
     drawFoliage();
 
-    // B3: Coop glow (behind captured animals)
-    drawCoopGlow();
+    // Footprints on ground
+    footprints.forEach(fp => fp.draw());
 
-    // B3: Chimney smoke (calibrated to chimney in background.png)
+    // Buildings
+    drawBuildingShadow(house.x, house.y, house.width, house.height);
+    safeDrawAnimatedImage(houseImg, house.x, house.y, house.width, house.height);
+
+    drawCoopGlow();
+    drawBuildingShadow(coop.x, coop.y, coop.width, coop.height);
+    safeDrawAnimatedImage(coopImg, coop.x, coop.y, coop.width, coop.height);
+
     updateAndDrawSmoke();
 
-    // B1: Animal shadows
+    // Obstacles (trees, rocks, bushes)
+    drawObstacles();
+
+    // Animals
     animals.forEach(animal => {
         if (!animal.captured) drawShadow(animal.x, animal.y, animal.width || 40, animal.height || 40, 0.2);
     });
     animals.forEach(animal => animal.draw());
 
-    // B1: Fox shadows
+    // Foxes
     foxes.forEach(fox => {
         drawShadow(fox.x, fox.y, fox.width, fox.height, 0.2);
     });
     foxes.forEach(fox => fox.draw());
 
-    for (let i = floatingTexts.length - 1; i >= 0; i--) {
-        floatingTexts[i].update();
-        floatingTexts[i].draw();
-        if (floatingTexts[i].life <= 0) floatingTexts.splice(i, 1);
-    }
-
+    // Powerups
     powerups.forEach(p => p.draw());
 
-    // B1: Dog shadow
+    // Dog
     if (dog) drawShadow(dog.x, dog.y, dog.width, dog.height, 0.2);
     if (dog) dog.draw();
 
-    const isMoving = keys['ArrowUp'] || keys['ArrowDown'] || keys['ArrowLeft'] || keys['ArrowRight'] ||
-        keys['KeyW'] || keys['KeyS'] || keys['KeyA'] || keys['KeyD'] ||
-        keys['KeyZ'] || keys['KeyQ'] ||
-        gamepadState['ArrowUp'] || gamepadState['ArrowDown'] || gamepadState['ArrowLeft'] || gamepadState['ArrowRight'];
-    const playerBob = isMoving ? Math.sin(Date.now() / 100) * 3 : 0;
+    // Player with animated walk / idle breathing
+    const t = Date.now() / 1000;
+    const playerBob = player.isMoving ? Math.abs(Math.sin(player.walkTimer)) * -5 : Math.sin(t * 2.5) * 1.2;
+    const playerRot = player.isMoving ? Math.sin(player.walkTimer) * 0.09 : 0;
+    const playerScaleY = player.isMoving ? 1 + Math.sin(player.walkTimer * 2) * 0.05 : 1 + Math.sin(t * 2.5) * 0.02;
+    const playerScaleX = 2 - playerScaleY;
 
-    // B1: Player shadow
-    drawShadow(player.x, player.y + playerBob, player.width, player.height, 0.3);
+    drawShadow(player.x, player.y + (player.isMoving ? 0 : playerBob * 0.3), player.width, player.height, 0.3);
 
     if (speedBoostTimer > 0) {
         ctx.save();
-        ctx.shadowBlur = 15;
+        ctx.shadowBlur = 16;
         ctx.shadowColor = 'yellow';
-        safeDrawImage(girlImg, player.x, player.y + playerBob, player.width, player.height, player.facingLeft);
+        safeDrawAnimatedImage(girlImg, player.x, player.y + playerBob, player.width, player.height, player.facingLeft, playerRot, playerScaleX, playerScaleY);
         ctx.restore();
     } else {
-        safeDrawImage(girlImg, player.x, player.y + playerBob, player.width, player.height, player.facingLeft);
+        safeDrawAnimatedImage(girlImg, player.x, player.y + playerBob, player.width, player.height, player.facingLeft, playerRot, playerScaleX, playerScaleY);
     }
 
-    // C2: Natural border (drawn on top of everything except HUD overlays)
     drawBorder();
 
-    // Draw particles on top
+    // World particles & floating texts
     particles.forEach(p => p.draw());
     floatingTexts.forEach(ft => ft.draw());
 
-    // Update HUD
+    ctx.restore();
+
+    // --- SCREEN SPACE RENDERING (HUD, Weather, Mini-map, Overlays) ---
+    updateAndDrawWeather();
+
+    if (isPlaying || isCountingDown) {
+        drawOffscreenAlerts();
+        drawMiniMap();
+    }
+
+    // Update HTML HUD
     hudScore.innerText = score;
     hudTimer.innerText = (elapsedTime / 1000).toFixed(1) + "s";
 
@@ -1292,14 +1859,14 @@ function draw() {
         ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
         ctx.fillRect(0, SCREEN_HEIGHT / 2 - 60, SCREEN_WIDTH, 120);
         ctx.fillStyle = '#FFD700';
-        ctx.font = 'bold 60px Outfit';
+        ctx.font = 'bold 54px Outfit';
         ctx.textAlign = 'center';
-        ctx.fillText('VICTOIRE ! Bravo ' + playerName, SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 + 20);
+        ctx.fillText('VICTOIRE ! Bravo ' + playerName, SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 + 18);
         ctx.textAlign = 'left';
     }
 
     if (isCountingDown) {
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.35)';
         ctx.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
         ctx.fillStyle = 'white';
         ctx.font = 'bold 120px Outfit';
@@ -1310,9 +1877,15 @@ function draw() {
         ctx.fillText('PRÊT ?', SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 - 100);
         ctx.font = '20px Outfit';
         ctx.fillStyle = '#a8e6cf';
-        ctx.fillText('Attrape les animaux pour les mettre dans le poulailler !', SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 + 100);
+        ctx.fillText('Explore la forêt et ramène les animaux au poulailler !', SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2 + 100);
         ctx.textAlign = 'left';
         ctx.textBaseline = 'alphabetic';
+    }
+
+    // Smooth fade-in transition
+    if (screenFade > 0) {
+        ctx.fillStyle = `rgba(14, 26, 18, ${screenFade})`;
+        ctx.fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT);
     }
 }
 
@@ -1337,5 +1910,7 @@ if (nameInput) {
     });
 }
 
+// Initialize world preview behind start screen
+resetGame(false);
 displayHighScores();
 requestAnimationFrame(gameLoop);
